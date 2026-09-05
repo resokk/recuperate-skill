@@ -5,6 +5,7 @@ description: Builds a cached, comprehensive understanding of a project — its i
 
 ## Ground rules
 
+- **Write your own text in English, regardless of the user's language or locale settings.** This applies to you and every crawler you launch — each crawler's own reference file restates it for itself, since each runs as an isolated prompt that never sees this document. It never applies to quoted source material (a comment, a commit message, a doc-comment) — that's preserved verbatim in whatever language it's actually written in.
 - **Read-only on the target project, write-only inside `.cache/recuperate/`** (a directory at the project root — `<project_root>/.cache/recuperate/` — not relative to this skill's own directory or any subprocess's working directory). This applies to you (the orchestrator) and every crawler you launch: read any file needed to plan or scope the work, but never create, modify, move, rename, or delete anything in the project outside `.cache/recuperate/` (including its `tmp/` subdirectory) — no source edits, no config changes, no git mutations, nothing. Each crawler's own reference file restates this for itself, since each runs as an isolated prompt that never sees this document.
 
 ## Agent roles reference
