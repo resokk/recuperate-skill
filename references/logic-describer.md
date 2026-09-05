@@ -18,6 +18,8 @@ You write a precise, line-referenced explanation of what each source file's logi
 - **Skip the most trivial/primitive lines** — bare literal assignments (`x = 5`), a plain `import`/`using` with no aliasing quirk, blank lines, a lone closing brace/`end`/`pass`, a trivial getter/setter with no logic. These don't need a line explaining what's self-evident from reading them.
 - **Never skip a line just because it looks short.** A one-line conditional, a single method call with a side effect, a regex, a magic-number constant, a default-parameter value — these are exactly where the pedantic detail earns its keep, even though they're short.
 - **Cite line numbers** for every explanation so the doc stays anchored to the actual source and can be checked against it directly.
+- **The header always names the source file's path relative to the project root — never relative to a sub-worker's own narrowed scope.** `# Logic — [source file path]` must read the same way (e.g. `src/billing/service.py`) whether you're the top-level instance processing the whole project or a sub-worker that was only handed `src/billing/`. Don't shorten or re-root the path to your own assigned subtree; a reader of the mirrored report tree needs the same path convention everywhere, regardless of how the work happened to get split.
+- **Mirror the source file's own structure in your headings — don't flatten it into an undifferentiated sequence of line ranges.** When the file defines classes, functions, or methods, those are headings in the report too, in the same nesting order they appear in the source (a class heading containing its methods' headings, each containing its own logic-block entries) — not a flat list of `## L12`, `## L20-27` sections with no indication of which class or function they belong to. Only fall back to a flat list of line-range sections for a file that's genuinely flat itself (a top-level script with no class/function structure). Losing the source's own structure in the report is exactly the kind of thing that makes a reader go back to the source file anyway, defeating the point of this report.
 - **Call out implicit behavior explicitly**: type coercion, truthiness/short-circuiting, whether a call mutates its argument or returns a copy, off-by-one boundaries in loops/slices, what happens on the error/exception path, null/None handling.
 - **Describe behavior, not quality.** You're documenting what the code does, not critiquing style or suggesting improvements.
 - **Mark genuine uncertainty** (dynamic dispatch, reflection, a call whose target can't be resolved statically) rather than asserting a confident explanation you can't back up from the code itself.
@@ -45,18 +47,45 @@ You write a precise, line-referenced explanation of what each source file's logi
 
 ## Output
 
-One file per source file with real logic, at `.cache/recuperate/logic/<same-relative-path>.md` (e.g. `src/utils/parser.py` → `.cache/recuperate/logic/src/utils/parser.py.md`):
+One file per source file with real logic, at `.cache/recuperate/logic/<same-relative-path>.md` (e.g. `src/utils/parser.py` → `.cache/recuperate/logic/src/utils/parser.py.md`). The path in the header is always project-root-relative, per the ground rule above.
+
+For a file with real class/function structure, mirror it — a class heading contains its methods, each method contains its own logic-block entries:
 
 ```markdown
-# Logic — [source file path]
+# Logic — src/billing/service.py
+
+## L1-8 — module-level setup
+What this block does, precisely — including any implicit behavior worth flagging.
+
+## class InvoiceService (L10-90)
+
+### method __init__ (L12-18)
+#### L15
+This line's specific effect. Flag here if it mutates an argument, coerces a type,
+short-circuits, or handles an edge case (empty input, null, boundary index) in a
+way that isn't obvious from the identifier names alone.
+
+### method prorate (L20-60)
+#### L20-27
+...
+#### L45
+...
+
+## function standalone_helper (L92-110)
+### L95-100
+...
+```
+
+For a file with no such structure (a flat top-level script, a config file), fall back to a flat sequence of line-range sections instead of forcing an empty class/function level that doesn't exist:
+
+```markdown
+# Logic — scripts/migrate.py
 
 ## L1-8
 What this block does, precisely — including any implicit behavior worth flagging.
 
 ## L12
-This line's specific effect. Flag here if it mutates an argument, coerces a type,
-short-circuits, or handles an edge case (empty input, null, boundary index) in a
-way that isn't obvious from the identifier names alone.
+This line's specific effect — same depth of detail as above.
 
 ## L20-27
 ...
