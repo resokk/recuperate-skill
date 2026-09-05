@@ -3,9 +3,21 @@ name: recuperate-skill
 description: Builds a cached, comprehensive understanding of a project — its internal file dependencies, external libraries, full-text search index, public API surface, per-line logic, per-domain implementation context, and git commit/ticket history — as the foundation for creating an implementation roadmap. Use when asked to plan or build a roadmap/phase structure for a project, or to gather deep codebase context before a large-scale refactor.
 ---
 
+## Agent roles reference
+
+Each crawler's full role definition (ground rules, responsibilities, workflow, output format) lives in its own reference file — read one in full before launching that crawler:
+
+- [`dependency-builder`](references/dependency-builder.md) — maps intra-codebase file dependencies (internal only; never external packages).
+- [`domain-researcher`](references/domain-researcher.md) — studies how a named domain is actually implemented in this project's own source code, including a dependency graph between the domain's found concerns.
+- [`ext-lib-inspector`](references/ext-lib-inspector.md) — catalogs external/third-party dependencies from every manifest in the project.
+- [`fulltext-search-builder`](references/fulltext-search-builder.md) — builds a SQLite FTS5 full-text search index over the project's source.
+- [`git-explorer`](references/git-explorer.md) — extracts the full git commit history and cross-references ticket IDs against Jira/Confluence.
+- [`logic-describer`](references/logic-describer.md) — writes a line-anchored, pedantic walkthrough of each file's real logic.
+- [`public-api-writer`](references/public-api-writer.md) — documents each file's public API surface in full detail, plus any API specification files (OpenAPI, GraphQL, Protobuf, AsyncAPI).
+
 ## Workflow
 
-1. **Run the crawler team.** All seven crawlers — `dependency-builder`, `domain-researcher`, `ext-lib-inspector`, `fulltext-search-builder`, `git-explorer`, `logic-describer`, `public-api-writer` — must run in parallel, with none started before or after another. Launch all seven in the same batch: use your runtime's agent-team feature if one is available (a persistent parallel team), otherwise send all seven as Agent tool calls in a single message. Launching even one of them separately — before, after, or staggered relative to the rest — is not parallel and defeats the point of this step.
+1. **Run the crawler team.** All seven crawler roles above must run in parallel, with none started before or after another. These are reference-defined roles, not registered Claude Code subagent types — for each one, read its full reference file and launch it as an Agent call using that file's complete content as the prompt (append the concrete task scope, e.g. the domain name for `domain-researcher`). Launch all seven in the same batch: use your runtime's agent-team feature if one is available (a persistent parallel team), otherwise send all seven as Agent tool calls in a single message. Launching even one of them separately — before, after, or staggered relative to the rest — is not parallel and defeats the point of this step.
    - **They don't interfere with each other by construction**: each crawler reads the same project tree (or, for `git-explorer`, its git history) but writes to its own disjoint path under `.cache/recuperate/` (`dependency/`, `ext-lib.md`, `fulltext.db`+`fulltext.md`, `git/`, `public-api/`, `logic/`, `domains/<slug>.md`) — no shared output file, so no write conflicts regardless of run order or timing.
    - **`domain-researcher` needs a domain name(s) to research**, not a pre-narrowed file scope — like the other crawlers it studies only this project's own source code, but framed around a named domain (e.g. "billing") so it can find and cite the files relevant to that domain instead of the whole tree indiscriminately. Before launching the team, determine the domain(s) from the project's own description (README, package/manifest description) if that's enough to name one or more concrete domains; ask the user only if it genuinely can't be inferred. The other six crawlers default to the whole project and need no extra input.
    - Give every crawler its whole default scope (whole project) unless the user has already narrowed it.
