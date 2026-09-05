@@ -17,6 +17,7 @@ You extract this project's git commit history, index it, and then enrich the tic
 - **Git log is the only source.** Don't grep source files for ticket mentions, don't infer a ticket ID from context — only what's literally present in commit message text counts.
 - **No repo, no fabrication.** If the target isn't inside a git working tree, or `git log` returns zero commits, stop and report that plainly — don't write empty or invented output files.
 - **Exact ticket format**: `<SPACE>-<id>` where SPACE is one or more uppercase letters/digits starting with a letter, and id is 1 to 5 digits exactly (e.g. `ABC-123`, `JIRA2-7`, but not a 6+-digit suffix) — matched with a word-boundary regex (`\b[A-Z][A-Z0-9]*-\d{1,5}\b`) against the raw message text. Don't loosen this to catch lowercase, non-numeric suffixes, or longer digit runs.
+- **The ticket regex is case-sensitive and the hyphen is mandatory — never soften either.** Do not compile it with `IGNORECASE`/`re.I` or any case-insensitive flag, and never make the hyphen optional. This isn't a style preference: a git commit hash (always lowercase hex, `[0-9a-f]`, never a hyphen) is structurally incapable of matching this pattern as written — it has no uppercase letter and no hyphen for the pattern to anchor on. The moment either constraint is loosened, ordinary hex hashes start getting misread as ticket IDs (e.g. a hash like `47944d54e` would never match the correct pattern, but would if matched case-insensitively with the hyphen dropped). Implement the regex exactly as given in the Workflow script below — don't rewrite it from memory.
 - **Preserve message fidelity.** Commit messages go into `messages.md` verbatim (subject + full body) — never paraphrased, truncated, or reformatted.
 - **Jira/Confluence access is read-only.** Only ever issue GET requests against the Jira REST API. Never create, update, comment on, or transition an issue, and never write anything to Confluence.
 - **Credentials come from the environment, never from output.** Expect `JIRA_BASE_URL`, `JIRA_EMAIL`, and `JIRA_API_TOKEN` (or equivalent) to already be set. If they're missing, or the first request fails auth, stop the Jira/Confluence phase and report it plainly — `messages.md`/`ticket.md` are still valid output on their own. Never print the token/credentials into any output file or log line.
@@ -42,13 +43,59 @@ You extract this project's git commit history, index it, and then enrich the tic
 1. `git rev-parse --is-inside-work-tree` to confirm scope; if it fails, stop and report — no files written. Then `git rev-parse --abbrev-ref HEAD` to name the current branch for the run summary — it's also the only branch this run will ever touch, and the only ref you'll ever pass to `git log`.
 2. `git rev-parse --is-shallow-repository`. If it prints `true`, run `git fetch --unshallow`; if that fetch fails, stop and report that only partial (shallow) history is available and why — don't proceed as though it's complete.
 3. `git rev-list --max-parents=0 HEAD` to record the repository's actual root commit(s) — you'll need this hash after extraction to confirm you really reached the beginning.
-4. Do the log extraction and ticket scan as one Bash script invocation (a short Python or shell script), not as a raw `git log` call whose output you read and re-transcribe yourself — for a long history, only the script should ever hold the full log text at once. Inside that script:
-   - Run `git log --date=short --pretty=format:'%h%x1f%ad%x1f%B%x1e'` with no ref argument other than the implicit current `HEAD`, and no count/date-limiting flag (`--all`, `--branches`, `--remotes`, `--max-count`, `-n`, `--since`, `--after`, `--until`, `--before`, `--skip` are all forbidden here).
-   - Split the captured stdout into records on `\x1e` and fields on `\x1f` (commit messages can contain arbitrary newlines, so a naive line-split would corrupt multi-line messages).
-   - Write every record straight to `messages.md`, newest first.
-   - Run the ticket regex (`\b[A-Z][A-Z0-9]*-\d{1,5}\b`) over each record's full message text, accumulating ticket ID → commit-hash-list.
-   - Write `ticket.md` sorted alphabetically by ticket ID.
-   - If `git log` produced zero records, stop and report — don't write empty files.
+4. Run this exact script via Bash instead of a raw `git log` call whose output you read and re-transcribe yourself — for a long history, only the script should ever hold the full log text at once, and implementing the regex here in real code (rather than reimplementing it from a description) is what keeps it case-sensitive and hyphen-strict:
+
+```python
+import subprocess
+import re
+import pathlib
+
+OUT_DIR = pathlib.Path(".cache/recuperate/git")
+OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+RS, FS = "\x1e", "\x1f"  # record / field separators
+
+result = subprocess.run(
+    ["git", "log", "--date=short", f"--pretty=format:%h{FS}%ad{FS}%B{RS}"],
+    capture_output=True, text=True, check=True,
+)
+records = [r for r in result.stdout.split(RS) if r.strip()]
+if not records:
+    raise SystemExit("git log produced zero records -- stop, don't write empty files")
+
+# Case-sensitive, mandatory hyphen. Never add re.IGNORECASE and never make
+# the "-" optional -- a bare lowercase git hash (e.g. "47944d54e") has no
+# uppercase letter and no hyphen, so this exact pattern cannot match one.
+TICKET_RE = re.compile(r"\b[A-Z][A-Z0-9]*-\d{1,5}\b")
+
+messages_lines = ["# Git Commit Messages", ""]
+ticket_map = {}  # ticket id -> [commit hashes]
+
+for record in records:
+    commit_hash, date, message = record.split(FS, 2)
+    commit_hash, message = commit_hash.strip(), message.strip("\n")
+
+    messages_lines += [f"## {commit_hash} — {date}", message, ""]
+
+    for m in TICKET_RE.finditer(message):
+        ticket = m.group(0)
+        # Belt-and-suspenders: a real ticket can never be this commit's
+        # own hash. If this ever fires, the regex above was changed.
+        if ticket.lower() in commit_hash.lower():
+            continue
+        ticket_map.setdefault(ticket, []).append(commit_hash)
+
+(OUT_DIR / "messages.md").write_text("\n".join(messages_lines), encoding="utf-8")
+
+if ticket_map:
+    ticket_lines = ["# Ticket References", ""]
+    ticket_lines += [f"- {t} — {', '.join(ticket_map[t])}" for t in sorted(ticket_map)]
+else:
+    ticket_lines = ["# Ticket References", "", "No ticket references found in commit history."]
+(OUT_DIR / "ticket.md").write_text("\n".join(ticket_lines), encoding="utf-8")
+
+print(f"Indexed {len(records)} commits, found {len(ticket_map)} unique tickets")
+```
 5. After the script exits, sanity-check it two ways before trusting it: (a) the captured commit count matches `git rev-list --count HEAD` exactly — a mismatch either direction means something leaked in from another branch or something was dropped; (b) the oldest commit hash captured is in the root-commit set from step 3 — if it isn't, the history is incomplete even if the count happens to look right. Re-run rather than report success if either check fails.
 6. Check `JIRA_BASE_URL`/`JIRA_EMAIL`/`JIRA_API_TOKEN` are set and a test request authenticates; if not, stop here and report the Jira/Confluence phase as skipped (steps 7-10 don't run).
 7. For each ticket ID from step 4, run `curl -s -u "$JIRA_EMAIL:$JIRA_API_TOKEN" "$JIRA_BASE_URL/rest/api/2/issue/<ticket-id>?fields=summary,description,issuetype"`; record a 404/error as a skip rather than retrying indefinitely.

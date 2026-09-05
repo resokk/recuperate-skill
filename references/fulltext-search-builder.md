@@ -14,6 +14,7 @@ You build a full-text index over the project's own source files so later steps c
 - Verify FTS5 is actually compiled into this Python's SQLite before relying on it (`CREATE VIRTUAL TABLE ... USING fts5(...)` in a scratch `:memory:` connection). If it isn't available, stop and report that clearly — don't silently substitute a different search mechanism or add a dependency to work around it.
 - Full rebuild every run: drop and recreate the index table rather than trying to update it incrementally. A codebase-search index doesn't need incremental freshness, and a full rebuild avoids stale/duplicate rows for a fraction of the complexity.
 - Index source only. Skip binary files (anything that fails UTF-8 decoding), vendor/build directories, and clearly-generated noise (lockfiles, minified bundles) — they bulk up the index without adding anything worth searching for.
+- **Strip import/include declaration lines from indexed content — index the logic, not the reference list.** A line that's purely an `import`/`from ... import`/`require(...)`/`#include`/`using` declaration adds search noise rather than signal: searching for a common library or symbol name would otherwise mostly return every file that merely imports it, drowning out files that actually use it. That structural information already lives in `dependency-builder`'s and `ext-lib-inspector`'s output — this index isn't the place for it. Only strip a line that *is* an import declaration (matches one of the patterns in the script below at the start of the line); never strip a line just because it contains the word "import" as a substring elsewhere (a comment, a variable named `import_count`, etc.).
 - Read-only over the codebase. You read file contents to index them; you never execute anything you find in the project.
 - **Never use the `Write` tool on `fulltext.db`.** `Write` is for `fulltext.md` only — the `.db` file must only ever be produced by the Python script's own `sqlite3` connection (the `CREATE VIRTUAL TABLE`/insert/commit steps). Writing text through `Write` to that path produces a file that sits at the right location but isn't a valid SQLite database, and every later query against it fails with `file is not a database`.
 - **A pre-existing `fulltext.db` that isn't a valid SQLite file is not an error to work around — delete it and rebuild.** If the script's connection attempt fails because the file exists but is corrupt, truncated, or was never a real database (leftover from an interrupted prior run, or a stray placeholder), remove the file first and let the script create it fresh; don't try to salvage or `DROP TABLE` inside a file that won't even open.
@@ -21,7 +22,7 @@ You build a full-text index over the project's own source files so later steps c
 ## Core responsibilities
 
 1. **Enumerate indexable files** under the project (or the scope given), excluding vendor/build/binary/generated noise.
-2. **Build a SQLite FTS5 virtual table** with one row per file: its path and full text content.
+2. **Build a SQLite FTS5 virtual table** with one row per file: its path and full text content, with import/include declaration lines stripped (see Ground rules).
 3. **Verify the index actually works** with a smoke-test query before reporting success.
 4. **Document how to query it**, so a later step (or the user) doesn't have to reverse-engineer the schema.
 
@@ -29,14 +30,37 @@ You build a full-text index over the project's own source files so later steps c
 
 1. Confirm scope — whole project by default.
 2. Glob for files, excluding `node_modules`, `vendor`, `.git`, `dist`, `build`, `__pycache__`, `.venv`/`venv`, `target`, common lockfiles (`package-lock.json`, `yarn.lock`, `Gemfile.lock`, `poetry.lock`, etc.), and minified assets (`*.min.js`, `*.min.css`). Skip any file that isn't valid UTF-8 text.
-3. Run this exact script via Bash (`python3 - <<'PYEOF' ... PYEOF`, or write it to a `.py` file with `Write` and run that — never write anything to `fulltext.db` itself with `Write`, only to a `.py` script file). Fill in `files` with the `(relative_path, content)` pairs from step 2; don't change the structure otherwise — this is the one and only way `fulltext.db` gets created:
+3. Run this exact script via Bash (`python3 - <<'PYEOF' ... PYEOF`, or write it to a `.py` file with `Write` and run that — never write anything to `fulltext.db` itself with `Write`, only to a `.py` script file). Fill in `files` with `(relative_path, strip_import_lines(content))` pairs from step 2 — every entry goes through `strip_import_lines()`, never the raw text; don't change the structure otherwise — this is the one and only way `fulltext.db` gets created:
 
 ```python
+import re
 import sqlite3
 import pathlib
 
 DB_PATH = pathlib.Path(".cache/recuperate/fulltext.db")
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+# Import/include declaration lines, per language -- stripped from indexed
+# content because they're reference noise, not logic (dependency-builder
+# and ext-lib-inspector already cover what imports what). Anchored to the
+# start of the line so "import" appearing inside a comment or identifier
+# elsewhere on a line is never touched.
+_IMPORT_LINE_RE = re.compile(
+    r"^\s*("
+    r"import\s+.+"                                  # Python "import x", JS "import x from 'y'"
+    r"|from\s+\S+\s+import\s+.+"                    # Python "from x import y"
+    r"|(export\s+)?(const|let|var)\s+.+=\s*require\(.+\)\s*;?"  # JS/TS require()
+    r"|using\s+[\w.]+\s*;"                          # C#/Java-style using
+    r"|#include\s*[<\"][^>\"]+[>\"]"                # C/C++
+    r"|require(_relative)?\s+['\"].+['\"]"          # Ruby
+    r"|use\s+[\w:{},\s\\]+;"                        # Rust / PHP
+    r")\s*$"
+)
+
+def strip_import_lines(text: str) -> str:
+    return "\n".join(
+        line for line in text.splitlines() if not _IMPORT_LINE_RE.match(line)
+    )
 
 # If a file already sits at DB_PATH, make sure it's actually a valid SQLite
 # database before touching it -- delete and start clean if it isn't.
@@ -61,7 +85,10 @@ con.execute(
 )
 
 files = [
-    # (relative_path, full_text_content) for every indexable file from step 2
+    # (relative_path, strip_import_lines(full_text_content)) for every
+    # indexable file from step 2 -- always run content through
+    # strip_import_lines() before it goes in this list, never index the
+    # raw text as-is.
 ]
 con.executemany("INSERT INTO files_fts (path, content) VALUES (?, ?)", files)
 con.commit()
@@ -100,6 +127,7 @@ con.close()
 - DB: `.cache/recuperate/fulltext.db`
 - Table: `files_fts(path, content)` — FTS5, tokenizer `porter unicode61`
 - Files indexed: N (skipped: M — binaries/lockfiles/vendor)
+- Content: import/include declaration lines stripped from every file before indexing — see `dependency-builder`/`ext-lib-inspector` output for what imports what
 - Built: <timestamp>
 
 ## Query example
