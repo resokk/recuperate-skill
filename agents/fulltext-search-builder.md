@@ -9,6 +9,7 @@ You build a full-text index over the project's own source files so later steps c
 ## Ground rules
 
 - **Respect `.gitignore`.** Never index a file/directory Git would ignore — apply `.gitignore` at every level (root and nested), plus `.git/info/exclude` and the global gitignore if configured. Check this before any other rule below.
+- **Fully isolated — no communication with other crawlers, and nothing but a completion signal to the parent.** Never message, coordinate with, or read the in-progress or finished output of another crawler agent — you only ever read the project's own source tree. On success, report back nothing but `JOB DONE`; never a summary or file count in chat. If FTS5 isn't available or the run otherwise couldn't produce a working index, say that plainly instead — never claim `JOB DONE` for a run that didn't actually finish.
 - Standard library only. `sqlite3` (with FTS5) ships with Python; that's the whole engine. Don't reach for Elasticsearch, Whoosh, or any other dependency to do this.
 - Verify FTS5 is actually compiled into this Python's SQLite before relying on it (`CREATE VIRTUAL TABLE ... USING fts5(...)` in a scratch `:memory:` connection). If it isn't available, stop and report that clearly — don't silently substitute a different search mechanism or add a dependency to work around it.
 - Full rebuild every run: drop and recreate the index table rather than trying to update it incrementally. A codebase-search index doesn't need incremental freshness, and a full rebuild avoids stale/duplicate rows for a fraction of the complexity.
@@ -28,14 +29,65 @@ You build a full-text index over the project's own source files so later steps c
 
 1. Confirm scope — whole project by default.
 2. Glob for files, excluding `node_modules`, `vendor`, `.git`, `dist`, `build`, `__pycache__`, `.venv`/`venv`, `target`, common lockfiles (`package-lock.json`, `yarn.lock`, `Gemfile.lock`, `poetry.lock`, etc.), and minified assets (`*.min.js`, `*.min.css`). Skip any file that isn't valid UTF-8 text.
-3. Run a short Python script via Bash that:
-   - Checks FTS5 availability; aborts with a clear message if it's missing.
-   - If `.cache/recuperate/fulltext.db` already exists, first confirm it's actually openable as SQLite (e.g. a quick `PRAGMA schema_version` succeeds); if that fails, delete the file and start from a clean one rather than trying to operate on it.
-   - Connects to `.cache/recuperate/fulltext.db`, drops any existing `files_fts` table, and recreates it: `CREATE VIRTUAL TABLE files_fts USING fts5(path, content, tokenize='porter unicode61')`.
-   - Inserts one row per indexable file (path relative to the project root, full file content).
-   - Commits.
-4. Smoke-test: `SELECT count(*) FROM files_fts` and one sample `MATCH` query against a term you know exists, to confirm the index is actually queryable before you report success.
-5. Write the short doc described below, then report back a summary (files indexed, files skipped and why, db size) — not the file contents inline.
+3. Run this exact script via Bash (`python3 - <<'PYEOF' ... PYEOF`, or write it to a `.py` file with `Write` and run that — never write anything to `fulltext.db` itself with `Write`, only to a `.py` script file). Fill in `files` with the `(relative_path, content)` pairs from step 2; don't change the structure otherwise — this is the one and only way `fulltext.db` gets created:
+
+```python
+import sqlite3
+import pathlib
+
+DB_PATH = pathlib.Path(".cache/recuperate/fulltext.db")
+DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+# If a file already sits at DB_PATH, make sure it's actually a valid SQLite
+# database before touching it -- delete and start clean if it isn't.
+if DB_PATH.exists():
+    try:
+        sqlite3.connect(DB_PATH).execute("PRAGMA schema_version").fetchone()
+    except sqlite3.DatabaseError:
+        DB_PATH.unlink()
+
+con = sqlite3.connect(DB_PATH)
+
+# Confirm FTS5 is actually compiled in before relying on it.
+try:
+    con.execute("CREATE VIRTUAL TABLE _fts5_probe USING fts5(x)")
+    con.execute("DROP TABLE _fts5_probe")
+except sqlite3.OperationalError as e:
+    raise SystemExit(f"FTS5 is not available in this Python's sqlite3: {e}")
+
+con.execute("DROP TABLE IF EXISTS files_fts")
+con.execute(
+    "CREATE VIRTUAL TABLE files_fts USING fts5(path, content, tokenize='porter unicode61')"
+)
+
+files = [
+    # (relative_path, full_text_content) for every indexable file from step 2
+]
+con.executemany("INSERT INTO files_fts (path, content) VALUES (?, ?)", files)
+con.commit()
+
+count = con.execute("SELECT count(*) FROM files_fts").fetchone()[0]
+assert count == len(files), f"expected {len(files)} rows, found {count}"
+
+# Smoke-test: MATCH must actually return something before this counts as working.
+sample_term = None
+if files:
+    for token in files[0][1].split():
+        if len(token) > 3 and token.isalnum():
+            sample_term = token
+            break
+if sample_term:
+    hit = con.execute(
+        "SELECT path FROM files_fts WHERE files_fts MATCH ? ORDER BY rank LIMIT 1",
+        (sample_term,),
+    ).fetchone()
+    assert hit, f"smoke-test MATCH query for {sample_term!r} returned nothing"
+    print(f"Smoke test OK: MATCH {sample_term!r} -> {hit[0]}")
+
+print(f"Indexed {count} files into {DB_PATH}")
+con.close()
+```
+4. If the script's assertions passed and it printed both the indexed count and the smoke-test line, the index is confirmed working — write the short doc described below, then report back only `JOB DONE` (no file count, no db size, no summary in chat — that's all in `fulltext.md`). If the script raised instead, fix the actual problem (don't catch and hide the assertion) before reporting anything as done; if it genuinely can't be fixed (e.g. FTS5 missing), say that plainly instead of claiming `JOB DONE`.
 
 ## Output
 
