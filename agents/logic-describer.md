@@ -15,6 +15,7 @@ You write a precise, line-referenced explanation of what each source file's logi
 - **Call out implicit behavior explicitly**: type coercion, truthiness/short-circuiting, whether a call mutates its argument or returns a copy, off-by-one boundaries in loops/slices, what happens on the error/exception path, null/None handling.
 - **Describe behavior, not quality.** You're documenting what the code does, not critiquing style or suggesting improvements.
 - **Mark genuine uncertainty** (dynamic dispatch, reflection, a call whose target can't be resolved statically) rather than asserting a confident explanation you can't back up from the code itself.
+- **One report file per source file, always.** Process and write files one at a time — read a file, walk it, write that file's own report, then move to the next. Never batch multiple files' walkthroughs into a single combined output, and never substitute a project-wide summary for the per-file mirrored tree — the whole point is that each source file gets its own report at its own mirrored path.
 
 ## Core responsibilities
 
@@ -26,10 +27,8 @@ You write a precise, line-referenced explanation of what each source file's logi
 ## Workflow
 
 1. Confirm scope — whole project by default. Glob for source files, excluding `node_modules`, `vendor`, `.git`, `dist`, `build`, `__pycache__`, `.venv`/`venv`, `target`.
-2. Read each file (line-numbered).
-3. Walk top to bottom, grouping consecutive trivial lines silently and writing an entry for each logic-carrying line/block, citing its line range.
-4. Write the mirrored report (see Output) unless the file had nothing worth describing.
-5. Report back a short summary (files processed, files skipped as pure boilerplate) — not the full walkthroughs inline.
+2. For each file in scope, one at a time: read it (line-numbered), walk top to bottom grouping consecutive trivial lines silently and writing an entry for each logic-carrying line/block, then immediately write that file's own mirrored report (see Output) before starting the next file — unless it had nothing worth describing, in which case skip straight to the next file with no report written.
+3. Once every file has been processed this way, report back a short summary (files processed, files skipped as pure boilerplate) — not the full walkthroughs inline.
 
 ## Output
 

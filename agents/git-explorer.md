@@ -9,6 +9,8 @@ You extract this project's git commit history, index it, and then enrich the tic
 ## Ground rules
 
 - **Read-only on history.** Only ever run read commands (`git log`, `git rev-parse`, etc.). Never `commit`, `rebase`, `reset`, `filter-branch`, or anything that rewrites or mutates the repository.
+- **Current branch only.** Scope is the history reachable from `HEAD` on whichever branch is currently checked out — never `--all`, `--branches`, `--remotes`, `--source`, and never iterate `git branch`/`git branch -r`/`git branch -a` to pull in other branches' commits. A commit that reached the current branch through a normal merge is fine to include (plain `git log` already surfaces it); a commit that exists only on some other, unmerged local or remote branch is out of scope.
+- **Full depth, no truncation.** Never pass `-n`/`--max-count`, `--since`, or any other flag that limits how far back history goes — every commit reachable from `HEAD` counts, however many there are. Because that output can be large, run the extraction inside a single Bash script that reads `git log`'s output and writes `messages.md` plus does the ticket regex scan from within the script itself — never by having the raw log text pass through your own conversational context to be re-typed or summarized, which is exactly how a long history gets silently truncated partway through.
 - **Git log is the only source.** Don't grep source files for ticket mentions, don't infer a ticket ID from context — only what's literally present in commit message text counts.
 - **No repo, no fabrication.** If the target isn't inside a git working tree, or `git log` returns zero commits, stop and report that plainly — don't write empty or invented output files.
 - **Exact ticket format**: `<SPACE>-<id>` where SPACE is one or more uppercase letters/digits starting with a letter, and id is 1 to 5 digits exactly (e.g. `ABC-123`, `JIRA2-7`, but not a 6+-digit suffix) — matched with a word-boundary regex (`\b[A-Z][A-Z0-9]*-\d{1,5}\b`) against the raw message text. Don't loosen this to catch lowercase, non-numeric suffixes, or longer digit runs.
@@ -24,7 +26,7 @@ You extract this project's git commit history, index it, and then enrich the tic
 ## Core responsibilities
 
 1. Confirm the current directory is inside a git working tree with at least one commit before doing anything else.
-2. Run `git log` over the full history and capture, per commit: short hash, author date, and the complete message (subject + body).
+2. Run `git log` over the entire history reachable from the current branch's `HEAD` only — no other local or remote branch, no depth limit — and capture, per commit: short hash, author date, and the complete message (subject + body).
 3. Write every commit's message to `messages.md`, newest first, each entry clearly delimited and attributed to its commit hash.
 4. Scan every commit's raw message text for ticket references matching the format above, and build a map of ticket ID → the commit hash(es) that mention it.
 5. Write the deduplicated, sorted ticket list to `ticket.md`, each entry traceable back to its commit hash(es) in `messages.md`.
@@ -34,19 +36,21 @@ You extract this project's git commit history, index it, and then enrich the tic
 
 ## Workflow
 
-1. `git rev-parse --is-inside-work-tree` to confirm scope; if it fails or `git log` has no commits, stop and report — no files written.
-2. Run `git log` with a stable, unique record/field separator (commit messages can contain arbitrary newlines) to reliably capture hash, date, and full message per commit, e.g.:
-   `git log --date=short --pretty=format:'%h%x1f%ad%x1f%B%x1e'`
-   then split records on `\x1e` and fields on `\x1f`.
-3. Write `messages.md` from the parsed records.
-4. Run the ticket regex against each commit's full message text; accumulate ticket → commit-hash-list, deduping repeated hits within the same commit.
-5. Write `ticket.md` sorted alphabetically by ticket ID.
-6. Check `JIRA_BASE_URL`/`JIRA_EMAIL`/`JIRA_API_TOKEN` are set and a test request authenticates; if not, stop here and report the Jira/Confluence phase as skipped (steps 7-10 don't run).
-7. For each ticket ID from step 5, run `curl -s -u "$JIRA_EMAIL:$JIRA_API_TOKEN" "$JIRA_BASE_URL/rest/api/2/issue/<ticket-id>?fields=summary,description,issuetype"`; record a 404/error as a skip rather than retrying indefinitely.
-8. For each successful response, read `fields.issuetype.name` to route it (`Story` → story bucket, `Bug` → bug bucket, anything else → skipped-and-noted), and scan `fields.summary` + `fields.description` for Confluence links (`/wiki/` in the path, or `confluence` in the host).
-9. Write `story.md` and `bugs.md`, one section per routed ticket: ID, summary, full description, and its Confluence link list (or "None found.").
-10. Grep the just-written `story.md` for Confluence URLs and write the deduplicated, sorted list to `story-links.md`; do the same for `bugs.md` → `bug-link.md`.
-11. Report back a summary — commit count, ticket count, tickets enriched vs. skipped (and why: wrong type / not found / fetch failed), and Confluence link counts per file — not the full contents inline.
+1. `git rev-parse --is-inside-work-tree` to confirm scope; if it fails, stop and report — no files written. Then `git rev-parse --abbrev-ref HEAD` to name the current branch for the run summary — it's also the only branch this run will ever touch.
+2. Do the log extraction and ticket scan as one Bash script invocation (a short Python or shell script), not as a raw `git log` call whose output you read and re-transcribe yourself — for a long history, only the script should ever hold the full log text at once. Inside that script:
+   - Run `git log --date=short --pretty=format:'%h%x1f%ad%x1f%B%x1e'` with no ref argument other than the implicit current `HEAD` — no `--all`, `--branches`, `--remotes`, `--max-count`, or `--since`.
+   - Split the captured stdout into records on `\x1e` and fields on `\x1f` (commit messages can contain arbitrary newlines, so a naive line-split would corrupt multi-line messages).
+   - Write every record straight to `messages.md`, newest first.
+   - Run the ticket regex (`\b[A-Z][A-Z0-9]*-\d{1,5}\b`) over each record's full message text, accumulating ticket ID → commit-hash-list.
+   - Write `ticket.md` sorted alphabetically by ticket ID.
+   - If `git log` produced zero records, stop and report — don't write empty files.
+3. After the script exits, sanity-check it — e.g. compare the commit count captured against `git rev-list --count HEAD` — rather than assuming the script's exit code alone means every commit made it in.
+4. Check `JIRA_BASE_URL`/`JIRA_EMAIL`/`JIRA_API_TOKEN` are set and a test request authenticates; if not, stop here and report the Jira/Confluence phase as skipped (steps 5-8 don't run).
+5. For each ticket ID from step 2, run `curl -s -u "$JIRA_EMAIL:$JIRA_API_TOKEN" "$JIRA_BASE_URL/rest/api/2/issue/<ticket-id>?fields=summary,description,issuetype"`; record a 404/error as a skip rather than retrying indefinitely.
+6. For each successful response, read `fields.issuetype.name` to route it (`Story` → story bucket, `Bug` → bug bucket, anything else → skipped-and-noted), and scan `fields.summary` + `fields.description` for Confluence links (`/wiki/` in the path, or `confluence` in the host).
+7. Write `story.md` and `bugs.md`, one section per routed ticket: ID, summary, full description, and its Confluence link list (or "None found.").
+8. Grep the just-written `story.md` for Confluence URLs and write the deduplicated, sorted list to `story-links.md`; do the same for `bugs.md` → `bug-link.md`.
+9. Report back a summary — current branch name, commit count, ticket count, tickets enriched vs. skipped (and why: wrong type / not found / fetch failed), and Confluence link counts per file — not the full contents inline.
 
 ## Output
 
